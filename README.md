@@ -4,17 +4,6 @@
 
 数据源：[ping.pe](https://ping.pe/) 的 MTR API（含 6 个真三网民用 vantage：CN_102/112 电信、CN_105/113 联通、CN_104/115 移动）。
 
-## ⚠️ 关于「去程 vs 回程」（重要）
-
-社区严格定义（参考 [bandwagonhost.net](https://www.bandwagonhost.net/1186.html)）：
-
-- **去程** = "本地到 VPS 的路由"，由**用户/国内 vantage** 出发 trace 到 VPS。
-- **回程** = "VPS 到本地的路由"，必须**在 VPS 上跑 traceroute** 回中国 IP。
-
-本模块通过 ping.pe 的国内三网民用 vantage 主动 trace 到节点 IP，方向是**国内 → 节点**，**这就是严格意义的"去程"**。
-
-**真正的"回程"（节点 → 国内）本模块测不到**——Surge 脚本沙箱仅 HTTP 不能 ICMP，且任何"国内 LG"（ping.pe / itdog / zhale）vantage 都在国内，不可能从节点端出发 trace。要测真回程见后文 [测真回程怎么办](#测真回程怎么办)。
-
 ## 文件
 
 - `route-test.sgmodule` — 模块清单
@@ -101,43 +90,6 @@ content:
 | 174 / 2914 / 3491 / 6453 / 1299 / 3257 / 6939 | TRANSIT-* （Cogent / NTT / PCCW / TATA / Telia / GTT / HE，不计入骨干） |
 
 路径同时出现 4134 与 4809 时显示 `CT-CN2 (163→CN2)` 表示双线切换。
-
-## 测真回程怎么办
-
-本模块**测不到回程**，要测真正的"节点 → 国内"路径，按可控性从高到低：
-
-### 方案 1：登录节点 SSH，跑 NextTrace / BestTrace
-
-```bash
-# NextTrace（推荐，识别国内骨干 ASN）
-bash <(curl -fsSL https://nxtrace.org/nt)
-# 然后跑：
-nexttrace 202.96.209.5      # → 上海电信 DNS（电信回程）
-nexttrace 202.106.0.20      # → 北京联通 DNS（联通回程）
-nexttrace 211.136.17.107    # → 北京移动 DNS（移动回程）
-
-# 或 BestTrace
-wget https://cdn.ipip.net/17mon/besttrace4linux.zip
-unzip besttrace4linux.zip && chmod +x besttrace
-./besttrace -q1 202.96.209.5
-```
-
-读 trace 报告里的 ASN：
-
-- AS4809 → CT-CN2（精品回程）
-- AS4134 → CT-163（普通回程）
-- AS9929 → CU-9929（精品）
-- AS4837 → CU-169
-- AS58807 → CM-CMIN2
-- AS9808 → CM-CMNET
-
-### 方案 2：用机房自带的 Looking Glass
-
-很多 VPS 商在机房页面提供 LG，你输入中国 IP，它在机房机器上 trace 给你。例如 [bandwagonhost LG](https://lg.bandwagonhost.com/)、[Vultr LG](https://www.vultr.com/faq/#lookingGlass)、Linode LG 等。
-
-### 方案 3：本模块未来扩展（你提供 endpoint）
-
-如果你在节点上跑一个 HTTP 接口（例如 `GET /trace?ip=...` 返回 JSON hop 数组），告诉我 endpoint 和响应格式，我可以加一个 `forwardTrace` adapter，让模块同时显示真回程。spike 阶段已留好接口位。
 
 ## 已知限制
 
