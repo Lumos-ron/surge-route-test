@@ -1,8 +1,12 @@
 /*
  * Surge Panel: Route Test (CN Backbone)
  *
- * 测试当前选中节点经国内三网民用 vantage 的回程路由，识别 CT-163/CN2、CU-169/9929、
- * CM-CMNET/CMI/CMIN2 等骨干线路类型。
+ * 测试当前选中节点经国内三网民用 vantage 的【去程路由】（严格定义：国内 → 节点
+ * 方向，由 vantage 主动发包），识别 CT-163/CN2、CU-169/9929、CM-CMNET/CMI/CMIN2
+ * 等骨干线路类型。
+ *
+ * 注意：真正的「回程」（节点 → 国内）需要在节点上跑 traceroute 或用机房 LG
+ * 反向 trace，Surge 沙箱仅能 HTTP，做不到。详见 README 的"测真回程怎么办"。
  *
  * 数据源: ping.pe（含 CN_102/104/105/112/113/115 真三网民用 vantage）
  *
@@ -524,7 +528,7 @@
     if (error && !exitIp) {
       const out = ['错误: ' + error];
       if (diag) appendDiag(out, diag);
-      return { title: '回程路由 · 失败', content: out.join('\n') };
+      return { title: '去程路由 · 失败', content: out.join('\n') };
     }
 
     lines.push('节点 IP: ' + (exitIp || '?'));
@@ -533,7 +537,7 @@
     const cacheNote = age != null ? '  缓存: ' + fmtAge(age) : '';
     lines.push('更新: ' + fmtTime(fetchedAt) + cacheNote + (partial ? '  (部分完成)' : ''));
     lines.push('');
-    lines.push('回程线路（国内 → 节点）');
+    lines.push('去程线路（国内 → 节点）');
 
     const titleTags = [];
     const carrierGroups = { ct: '电信', cu: '联通', cm: '移动' };
@@ -571,7 +575,7 @@
       appendDiag(lines, diag);
     }
 
-    const title = '回程路由 · ' + titleTags.join(' / ');
+    const title = '去程路由 · ' + titleTags.join(' / ');
     return { title, content: lines.join('\n') };
   }
 
@@ -685,13 +689,13 @@
   main()
     .then((panel) => {
       try {
-        $done({ title: panel.title || '回程路由', content: panel.content || '' });
+        $done({ title: panel.title || '去程路由', content: panel.content || '' });
       } catch (e) {
-        $done({ title: '回程路由 · 错误', content: 'panel render failed: ' + e.message });
+        $done({ title: '去程路由 · 错误', content: 'panel render failed: ' + e.message });
       }
     })
     .catch((err) => {
       log('error', 'unhandled', err && err.message);
-      $done({ title: '回程路由 · 异常', content: '内部错误: ' + (err && err.message ? err.message : String(err)) });
+      $done({ title: '去程路由 · 异常', content: '内部错误: ' + (err && err.message ? err.message : String(err)) });
     });
 })();
