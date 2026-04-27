@@ -263,27 +263,120 @@
   }
 
   // ============================================================================
+  // 4b. NODE INFO（拿节点出口 ASN/ISP/地理；近似"去程目的端"信息）
+  // ============================================================================
+
+  // 数据中心 / 云厂商 ASN → 简短标签。命中即标"DC"，方便用户识别"非民用 ISP"。
+  const DC_ASN = {
+    13335: 'Cloudflare',
+    15169: 'Google',
+    16509: 'AWS',
+    14618: 'AWS',
+    8075: 'Azure',
+    8068: 'Azure',
+    16276: 'OVH',
+    20473: 'Choopa/Vultr',
+    14061: 'DigitalOcean',
+    63949: 'Linode',
+    24940: 'Hetzner',
+    36352: 'ColoCrossing',
+    7506: 'GMO',
+    396982: 'GCP',
+    32934: 'Facebook',
+    13414: 'Twitter',
+    45102: 'Alibaba',
+    37963: 'Alibaba',
+    45062: 'Alibaba',
+    132203: 'Tencent',
+    133478: 'Tencent',
+    134963: 'Alibaba',
+    8987: 'Amazon',
+  };
+
+  // 用 ipinfo.io 查节点 IP 的 ASN/org/city/country。免费、CORS 友好、无需 token 的少量查询。
+  async function lookupNodeInfo(ip, opts) {
+    opts = opts || {};
+    try {
+      const r = await http('GET', 'https://ipinfo.io/' + ip + '/json', { timeoutMs: opts.timeoutMs || 6000 });
+      if (r.status < 200 || r.status >= 300) return null;
+      const j = JSON.parse(r.body);
+      // org 形如 "AS13335 Cloudflare, Inc."
+      let asn = null, org = null;
+      if (typeof j.org === 'string') {
+        const m = j.org.match(/^AS(\d+)\s+(.+)$/);
+        if (m) { asn = parseInt(m[1], 10); org = m[2]; }
+        else { org = j.org; }
+      }
+      return {
+        ip,
+        asn,
+        org,
+        city: j.city || null,
+        region: j.region || null,
+        country: j.country || null,
+        loc: j.loc || null,
+        hostname: j.hostname || null,
+        dcLabel: asn && DC_ASN[asn] ? DC_ASN[asn] : null,
+      };
+    } catch (e) {
+      log('info', 'lookupNodeInfo failed', e.message);
+      return null;
+    }
+  }
+
+  function fmtNodeInfo(info) {
+    if (!info) return null;
+    const parts = [];
+    if (info.country) {
+      const geo = [info.country, info.region, info.city].filter(Boolean).join('/');
+      parts.push(geo);
+    }
+    if (info.asn) parts.push('AS' + info.asn);
+    if (info.dcLabel) parts.push(info.dcLabel);
+    else if (info.org) parts.push(info.org.length > 28 ? info.org.slice(0, 26) + '…' : info.org);
+    return parts.join(' · ');
+  }
+
+  // ============================================================================
   // 5. PING.PE ADAPTER（四步协议）
   // ============================================================================
 
   const PING_PE = 'https://ping.pe';
 
-  async function pingPeRun(targetIp, deadline) {
+  async function pingPeRun(targetIp, deadline, diag) {
+    diag = diag || {};
+    diag.steps = diag.steps || [];
+    const stepStart = (name) => {
+      const s = { name, t0: Date.now() };
+      diag.steps.push(s);
+      return s;
+    };
+    const stepEnd = (s, status, info) => {
+      s.elapsedMs = Date.now() - s.t0;
+      s.status = status;
+      if (info) s.info = info;
+    };
+
     // Step 1: bootstrap，拿 antiflood cookie
+    const s1 = stepStart('bootstrap');
     const bootstrap = await http('GET', PING_PE + '/' + targetIp, { timeoutMs: 8000 });
     const cookie = parseAntiflood(bootstrap.body);
+    stepEnd(s1, cookie ? 'ok' : 'fail', { httpStatus: bootstrap.status, cookieLen: cookie ? cookie.length : 0 });
     if (!cookie) throw new Error('无法解析 antiflood cookie');
 
     // Step 2: 完整页 + token
+    const s2 = stepStart('fullpage');
     const full = await http('GET', PING_PE + '/' + targetIp + '?browsercheck=ok', {
       headers: { Cookie: 'antiflood=' + cookie },
       timeoutMs: 12000,
     });
-    if (full.status !== 200) throw new Error('full page status ' + full.status);
+    if (full.status !== 200) { stepEnd(s2, 'fail', { httpStatus: full.status }); throw new Error('full page status ' + full.status); }
     const token = parseTaskStartToken(full.body);
+    stepEnd(s2, token ? 'ok' : 'fail', { httpStatus: full.status, htmlSize: full.body.length, tokenLen: token ? token.length : 0 });
     if (!token) throw new Error('无法解析 taskStartToken');
 
     // Step 3: startTask
+    const s3 = stepStart('startTask');
     const start = await http('POST', PING_PE + '/ajax_startTask_v1.php', {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -295,14 +388,17 @@
       timeoutMs: 10000,
     });
     let startJson;
-    try { startJson = JSON.parse(start.body); } catch (e) { throw new Error('startTask 响应非 JSON'); }
+    try { startJson = JSON.parse(start.body); } catch (e) { stepEnd(s3, 'fail', { httpStatus: start.status, body: start.body.slice(0, 120) }); throw new Error('startTask 响应非 JSON'); }
     if (!startJson.ok || !startJson.data || !startJson.data.stream_id_mtr) {
+      stepEnd(s3, 'fail', { httpStatus: start.status, error: startJson.error });
       throw new Error('startTask 失败: ' + (startJson.error || start.body.slice(0, 120)));
     }
     const streamId = startJson.data.stream_id_mtr;
+    stepEnd(s3, 'ok', { httpStatus: start.status, pingerCount: startJson.data.pinger_count });
     log('info', 'stream_id_mtr', streamId, 'pinger_count', startJson.data.pinger_count);
 
     // Step 4: poll until done or budget exhausted
+    const s4 = stepStart('poll');
     const interval = 6000; // ping.pe JS 用 6s 轮询
     const headers = { Cookie: 'antiflood=' + cookie, Referer: PING_PE + '/' + targetIp };
 
@@ -310,17 +406,23 @@
     await sleep(Math.min(22000, deadline - Date.now() - 4000));
 
     let lastJson = null;
+    let pollCount = 0;
+    let lastOutstanding = null;
+    let stoppedReason = 'budget';
     while (Date.now() < deadline) {
       const r = await http('GET', PING_PE + '/ajax_getPingResults_v2.php?stream_id=' + streamId, { headers, timeoutMs: 10000 });
-      try { lastJson = JSON.parse(r.body); } catch (e) { log('error', 'poll parse failed'); break; }
+      pollCount++;
+      try { lastJson = JSON.parse(r.body); } catch (e) { log('error', 'poll parse failed'); stoppedReason = 'parse-err'; break; }
       const out = (lastJson && lastJson.state && lastJson.state.outstandingNodeCount) | 0;
+      lastOutstanding = out;
       log('info', 'poll outstanding', out);
-      if (out === 0) break;
+      if (out === 0) { stoppedReason = 'all-done'; break; }
       // 关注的 vantage 是否都出结果了？是则提前结束
-      if (lastJson && Array.isArray(lastJson.data) && allEnabledVantagesDone(lastJson.data)) break;
-      if (deadline - Date.now() < interval + 2000) break;
+      if (lastJson && Array.isArray(lastJson.data) && allEnabledVantagesDone(lastJson.data)) { stoppedReason = 'enabled-done'; break; }
+      if (deadline - Date.now() < interval + 2000) { stoppedReason = 'budget'; break; }
       await sleep(interval);
     }
+    stepEnd(s4, lastOutstanding === 0 ? 'ok' : 'partial', { polls: pollCount, lastOutstanding, stoppedReason });
 
     // Step 5: best-effort cleanup（不阻塞）
     http('GET', PING_PE + '/ajax_stopTask.php?stream_id=' + streamId, { headers, timeoutMs: 4000 }).catch(() => {});
@@ -417,23 +519,27 @@
     return out;
   }
 
-  function formatPanel({ exitIp, exitMeta, results, partial, age, fetchedAt, error }) {
+  function formatPanel({ exitIp, nodeInfo, results, partial, age, fetchedAt, error, diag }) {
     const lines = [];
     if (error && !exitIp) {
-      return { title: '路由测试 · 失败', content: '错误: ' + error };
+      const out = ['错误: ' + error];
+      if (diag) appendDiag(out, diag);
+      return { title: '回程路由 · 失败', content: out.join('\n') };
     }
 
-    const ipLine = '节点 IP: ' + (exitIp || '?') + (exitMeta ? '  (' + exitMeta + ')' : '');
-    lines.push(ipLine);
+    lines.push('节点 IP: ' + (exitIp || '?'));
+    const nodeMeta = fmtNodeInfo(nodeInfo);
+    if (nodeMeta) lines.push('归属: ' + nodeMeta);
     const cacheNote = age != null ? '  缓存: ' + fmtAge(age) : '';
     lines.push('更新: ' + fmtTime(fetchedAt) + cacheNote + (partial ? '  (部分完成)' : ''));
     lines.push('');
+    lines.push('回程线路（国内 → 节点）');
 
     const titleTags = [];
     const carrierGroups = { ct: '电信', cu: '联通', cm: '移动' };
     for (const c of ['ct', 'cu', 'cm']) {
       if (!ENABLED_CARRIERS.has(c)) continue;
-      const carrierResults = results.filter((r) => r.vantage.carrier === c);
+      const carrierResults = (results || []).filter((r) => r.vantage.carrier === c);
       const tags = carrierResults.map((r) => r.tag).filter(Boolean);
       const uniq = Array.from(new Set(tags));
       if (uniq.length) titleTags.push(uniq.join('|'));
@@ -442,7 +548,7 @@
 
     for (const c of ['ct', 'cu', 'cm']) {
       if (!ENABLED_CARRIERS.has(c)) continue;
-      const carrierResults = results.filter((r) => r.vantage.carrier === c);
+      const carrierResults = (results || []).filter((r) => r.vantage.carrier === c);
       for (const r of carrierResults) {
         const left = padRight(r.vantage.label, 9);
         let right;
@@ -460,8 +566,41 @@
       }
     }
 
-    const title = '路由 · ' + titleTags.join(' / ');
+    // 诊断尾：partial 或 debug 模式自动追加；正常完成不打扰
+    if (diag && (partial || ARG.debug)) {
+      appendDiag(lines, diag);
+    }
+
+    const title = '回程路由 · ' + titleTags.join(' / ');
     return { title, content: lines.join('\n') };
+  }
+
+  function appendDiag(lines, diag) {
+    lines.push('');
+    lines.push('— 诊断 —');
+    if (diag.totalElapsedMs != null) lines.push('总耗时: ' + Math.round(diag.totalElapsedMs / 100) / 10 + 's');
+    for (const s of (diag.steps || [])) {
+      const dur = s.elapsedMs != null ? (Math.round(s.elapsedMs / 100) / 10) + 's' : '?';
+      const status = s.status || '?';
+      let extra = '';
+      if (s.info) {
+        const i = s.info;
+        const bits = [];
+        if (i.httpStatus != null) bits.push('http=' + i.httpStatus);
+        if (i.cookieLen != null) bits.push('cookie=' + i.cookieLen);
+        if (i.tokenLen != null) bits.push('token=' + i.tokenLen);
+        if (i.htmlSize != null) bits.push('html=' + i.htmlSize);
+        if (i.pingerCount != null) bits.push('pingers=' + i.pingerCount);
+        if (i.polls != null) bits.push('polls=' + i.polls);
+        if (i.lastOutstanding != null) bits.push('outst=' + i.lastOutstanding);
+        if (i.stoppedReason) bits.push('stop=' + i.stoppedReason);
+        if (i.error) bits.push('err=' + String(i.error).slice(0, 40));
+        if (i.body) bits.push('body=' + String(i.body).slice(0, 40));
+        if (bits.length) extra = '  ' + bits.join(' ');
+      }
+      lines.push('  ' + padRight(s.name, 12) + status + ' ' + dur + extra);
+    }
+    if (diag.nodeInfoStatus) lines.push('  ' + padRight('nodeinfo', 12) + diag.nodeInfoStatus);
   }
 
   function padRight(s, w) {
@@ -480,15 +619,18 @@
   async function main() {
     const startedAt = Date.now();
     const overallDeadline = startedAt + 55000; // 留 5s 给 $done 和 cleanup
+    const diag = { steps: [], totalElapsedMs: null, nodeInfoStatus: null };
 
     let exitIp = null;
     try {
       exitIp = await resolveExitIp();
     } catch (e) {
-      return formatPanel({ error: e.message });
+      diag.totalElapsedMs = Date.now() - startedAt;
+      return formatPanel({ error: e.message, diag });
     }
     if (!isUsableIp(exitIp)) {
-      return { title: '路由 · 异常', content: '节点出口 IP ' + exitIp + ' 不可用（私有/CGN/IPv6/未走代理？）' };
+      diag.totalElapsedMs = Date.now() - startedAt;
+      return formatPanel({ exitIp, error: '节点出口 IP ' + exitIp + ' 不可用（私有/CGN/IPv6/未走代理？）', diag });
     }
 
     const cacheKey = exitIp + ':' + Array.from(ENABLED_CARRIERS).sort().join(',');
@@ -497,7 +639,7 @@
       log('info', 'cache hit', cacheKey, fmtAge(Date.now() - cached.fetchedAt));
       return formatPanel({
         exitIp,
-        exitMeta: cached.exitMeta,
+        nodeInfo: cached.nodeInfo,
         results: cached.results,
         partial: cached.partial,
         age: Date.now() - cached.fetchedAt,
@@ -505,12 +647,24 @@
       });
     }
 
-    let rawJson;
+    // 节点信息查询与 ping.pe trace 并发，节省时间
+    const nodeInfoP = lookupNodeInfo(exitIp, { timeoutMs: 6000 })
+      .then((info) => { diag.nodeInfoStatus = info ? 'ok' : 'no-data'; return info; })
+      .catch((e) => { diag.nodeInfoStatus = 'err: ' + e.message; return null; });
+
+    let rawJson, runErr;
     try {
-      rawJson = await pingPeRun(exitIp, overallDeadline);
+      rawJson = await pingPeRun(exitIp, overallDeadline, diag);
     } catch (e) {
+      runErr = e;
       log('error', 'ping.pe run failed', e.message);
-      return { title: '路由 · 失败', content: '节点 IP: ' + exitIp + '\n错误: ' + e.message };
+    }
+
+    const nodeInfo = await nodeInfoP;
+    diag.totalElapsedMs = Date.now() - startedAt;
+
+    if (runErr) {
+      return formatPanel({ exitIp, nodeInfo, error: runErr.message, diag });
     }
 
     const results = buildResults(rawJson);
@@ -518,8 +672,8 @@
     const partial = outstanding > 0 || results.some((r) => r.status === 'pending');
 
     const fetchedAt = Date.now();
-    const payload = { exitIp, results, partial, fetchedAt };
-    if (!partial) cacheWrite(cacheKey, payload);
+    const payload = { exitIp, nodeInfo, results, partial, fetchedAt, diag };
+    if (!partial) cacheWrite(cacheKey, { exitIp, nodeInfo, results, partial, fetchedAt });
 
     return formatPanel(payload);
   }
@@ -531,13 +685,13 @@
   main()
     .then((panel) => {
       try {
-        $done({ title: panel.title || '路由测试', content: panel.content || '' });
+        $done({ title: panel.title || '回程路由', content: panel.content || '' });
       } catch (e) {
-        $done({ title: '路由 · 错误', content: 'panel render failed: ' + e.message });
+        $done({ title: '回程路由 · 错误', content: 'panel render failed: ' + e.message });
       }
     })
     .catch((err) => {
       log('error', 'unhandled', err && err.message);
-      $done({ title: '路由 · 异常', content: '内部错误: ' + (err && err.message ? err.message : String(err)) });
+      $done({ title: '回程路由 · 异常', content: '内部错误: ' + (err && err.message ? err.message : String(err)) });
     });
 })();
