@@ -1,0 +1,11 @@
+#!name=Route Test (CN Backbone)
+#!desc=测试当前节点经国内三网民用 vantage 的回程路由，并识别骨干线路类型（CT-163/CN2、CU-169/9929、CM-CMNET/CMI/CMIN2）。数据源：ping.pe（CN_102/104/105/112/113/115 真三网民用 vantage）。
+#!author=route-test
+#!arguments=carriers:ct|cu|cm,cache_ttl:300,poll_budget_ms:48000,ip_resolver:https://api.ip.sb/jsonip,debug:false
+#!arguments-desc=carriers: 要展示的运营商，| 分隔，可选 ct/cu/cm（默认全开）\ncache_ttl: 同一节点 IP 的结果缓存秒数，0=禁用（默认 300）\npoll_budget_ms: ping.pe MTR 轮询预算毫秒，达到后返回部分结果（默认 48000，留 12s 给其他步骤）\nip_resolver: 取节点出口 IP 的 API（默认 api.ip.sb/jsonip）\ndebug: true 时面板追加每跳详情和原始错误（默认 false）
+
+[Panel]
+RouteTest = script-name=RouteTest, title=路由测试, content=点击刷新, update-interval=-1
+
+[Script]
+RouteTest = type=generic, timeout=60, script-path=https://raw.githubusercontent.com/Lumos-ron/surge-route-test/main/route-test.js, argument=carriers=ct|cu|cm&cache_ttl=300&poll_budget_ms=48000&ip_resolver=https://api.ip.sb/jsonip&debug=false
